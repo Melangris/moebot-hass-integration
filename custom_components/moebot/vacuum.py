@@ -3,10 +3,13 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from homeassistant.components.vacuum import StateVacuumEntity, STATE_DOCKED, StateVacuumEntityDescription, \
-    STATE_CLEANING, STATE_RETURNING, STATE_ERROR, VacuumEntityFeature
+# Se eliminan las constantes STATE_ de aquí porque ya no existen en HA Core
+from homeassistant.components.vacuum import (
+    StateVacuumEntity, 
+    StateVacuumEntityDescription, 
+    VacuumEntityFeature
+)
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import STATE_IDLE
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.icon import icon_for_battery_level
@@ -14,6 +17,13 @@ from pymoebot import MoeBot
 
 from . import BaseMoeBotEntity
 from .const import DOMAIN
+
+# Definición manual de estados para compatibilidad con HA moderno
+STATE_IDLE = "idle"
+STATE_CLEANING = "cleaning"
+STATE_DOCKED = "docked"
+STATE_RETURNING = "returning"
+STATE_ERROR = "error"
 
 _STATUS_TO_HA = {
     "STANDBY": STATE_DOCKED,
@@ -47,31 +57,30 @@ class MoeBotVacuumEntity(BaseMoeBotEntity, StateVacuumEntity):
     def __init__(self, moebot: MoeBot):
         super().__init__(moebot)
 
-        # A unique_id for this entity within this domain.
-        # Note: This is NOT used to generate the user visible Entity ID used in automations.
+        # ID único para la entidad
         self._attr_unique_id = f"{self._moebot.id}_vacuum"
-
         self._attr_name = f"MoeBot"
+        self._attr_icon = "mdi:robot-mower"
 
-        self.__attr_icon = "mdi:robot-mower"
-
-        self._attr_supported_features = 0
-        self._attr_supported_features |= VacuumEntityFeature.PAUSE
-        self._attr_supported_features |= VacuumEntityFeature.STOP
-        self._attr_supported_features |= VacuumEntityFeature.RETURN_HOME
-        self._attr_supported_features |= VacuumEntityFeature.BATTERY
-        self._attr_supported_features |= VacuumEntityFeature.STATE
-        self._attr_supported_features |= VacuumEntityFeature.START
+        # Características soportadas (usando el nuevo formato de bits)
+        self._attr_supported_features = (
+            VacuumEntityFeature.PAUSE |
+            VacuumEntityFeature.STOP |
+            VacuumEntityFeature.RETURN_HOME |
+            VacuumEntityFeature.BATTERY |
+            VacuumEntityFeature.STATE |
+            VacuumEntityFeature.START
+        )
 
     @property
     def state(self) -> str | None:
         mb_state = self._moebot.state
-        return _STATUS_TO_HA[mb_state]
+        return _STATUS_TO_HA.get(mb_state, STATE_ERROR)
 
     @property
     def battery_icon(self) -> str:
         """Return the battery icon for the vacuum cleaner."""
-        charging = bool(self._moebot.state == "CHARGING" or self._moebot.state == "CHARGING_WITH_TASK_SUSPEND")
+        charging = bool(self._moebot.state in ["CHARGING", "CHARGING_WITH_TASK_SUSPEND"])
 
         return icon_for_battery_level(
             battery_level=self.battery_level, charging=charging
