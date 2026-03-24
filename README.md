@@ -14,10 +14,10 @@ Provides the following:
 
 Easiest install is via [HACS](https://hacs.xyz/) 
 
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=Whytey&repository=https%3A%2F%2Fgithub.com%2FWhytey%2Fmoebot-hass-integration&category=integration)
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=Melangris&repository=moebot-hass-integration&category=integration)
 
-1. Add the repository to your HACS install by clicking the button below:
-1. Restart HA
+1. Add the repository to your HACS install by clicking the button [above](https://my.home-assistant.io/redirect/hacs_repository/?owner=Melangris&repository=moebot-hass-integration&category=integration).
+2. Restart HA
 
 For manual installation for advanced users, copy `custom_components/moebot` to your `custom_components` folder in Home Assistant then continue from step 2 above.
 
