@@ -1,0 +1,26 @@
+set_back_mowing:
+  description: "Activa o desactiva el corte mientras el robot da marcha atrás"
+  target:
+    entity_id:
+      domain: vacuum
+  fields:
+    enabled:
+      description: "True para activar, False para desactivar"
+      example: true
+      selector:
+        boolean:
+
+set_rain_delay:
+  description: "Configura el tiempo de espera tras lluvia (en minutos)"
+  target:
+    entity_id:
+      domain: vacuum
+  fields:
+    minutes:
+      description: "Minutos de espera (ej. 60, 120)"
+      example: 60
+      selector:
+        number:
+          min: 0
+          max: 720
+          unit_of_measurement: "min"
