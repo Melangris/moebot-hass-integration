@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-# Se eliminan las constantes STATE_ de aquí porque ya no existen en HA Core
 from homeassistant.components.vacuum import (
     StateVacuumEntity, 
     StateVacuumEntityDescription, 
@@ -57,12 +56,10 @@ class MoeBotVacuumEntity(BaseMoeBotEntity, StateVacuumEntity):
     def __init__(self, moebot: MoeBot):
         super().__init__(moebot)
 
-        # ID único para la entidad
         self._attr_unique_id = f"{self._moebot.id}_vacuum"
-        self._attr_name = f"MoeBot"
+        self._attr_name = "MoeBot"
         self._attr_icon = "mdi:robot-mower"
 
-        # Características soportadas (usando el nuevo formato de bits)
         self._attr_supported_features = (
             VacuumEntityFeature.PAUSE |
             VacuumEntityFeature.STOP |
@@ -81,21 +78,29 @@ class MoeBotVacuumEntity(BaseMoeBotEntity, StateVacuumEntity):
     def battery_icon(self) -> str:
         """Return the battery icon for the vacuum cleaner."""
         charging = bool(self._moebot.state in ["CHARGING", "CHARGING_WITH_TASK_SUSPEND"])
-
         return icon_for_battery_level(
             battery_level=self.battery_level, charging=charging
         )
 
     @property
     def battery_level(self) -> int | None:
-        return round(self._moebot.battery)
+        try:
+            return round(self._moebot.battery)
+        except (TypeError, ValueError):
+            return 0
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Exponer atributos adicionales heredados de BaseMoeBotEntity."""
+        # Llamamos al método de la clase base que ya configuramos con los DPs 118, 121, 139, etc.
+        return super().extra_state_attributes
+
+    # --- COMANDOS ESTÁNDAR ---
 
     def start(self) -> None:
-        """Start or resume the cleaning task."""
         self._moebot.start()
 
     def pause(self) -> None:
-        """Pause the cleaning task."""
         self._moebot.pause()
 
     def stop(self, **kwargs: Any) -> None:
@@ -105,4 +110,5 @@ class MoeBotVacuumEntity(BaseMoeBotEntity, StateVacuumEntity):
         self._moebot.dock()
 
     def clean_spot(self, **kwargs: Any) -> None:
-        self._moebot.start(spiral=True)
+        """Not implemented."""
+        pass

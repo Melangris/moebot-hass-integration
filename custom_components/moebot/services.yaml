@@ -1,26 +1,32 @@
 set_back_mowing:
-  description: "Activa o desactiva el corte mientras el robot da marcha atrás"
-  target:
-    entity_id:
-      domain: vacuum
+  description: "Configura la parada o giro de cuchilla cuando el robot maniobra hacia atrás (DP 121)"
   fields:
     enabled:
-      description: "True para activar, False para desactivar"
+      description: "True para detener la cuchilla al retroceder, False para que siga girando"
       example: true
       selector:
         boolean:
 
 set_rain_delay:
-  description: "Configura el tiempo de espera tras lluvia (en minutos)"
-  target:
-    entity_id:
-      domain: vacuum
+  description: "Configura el tiempo de espera tras detectar lluvia (DP 139)"
   fields:
     minutes:
-      description: "Minutos de espera (ej. 60, 120)"
+      name: "Minutos"
+      description: "Minutos de espera tras secarse el sensor de lluvia"
       example: 60
+      default: 60
       selector:
         number:
           min: 0
           max: 720
           unit_of_measurement: "min"
+          mode: box
+
+set_hedgehog_protection:
+  description: "Activa o desactiva el modo de protección de animales pequeños (DP 118)"
+  fields:
+    enabled:
+      description: "True para activar protección, False para desactivar"
+      example: true
+      selector:
+        boolean:

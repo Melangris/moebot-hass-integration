@@ -1,4 +1,5 @@
 import logging
+import base64
 from dataclasses import dataclass
 from enum import Enum
 
@@ -16,7 +17,10 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
     """Add sensors for passed config_entry in HA."""
     moebot = hass.data[DOMAIN][config_entry.entry_id]
 
-    entities = [WorkingTimeNumber(moebot)]
+    entities = [
+            WorkingTimeNumber(moebot),
+            RainDelayNumber(moebot)
+    ]
     for zone in range(1, 6):
         for part in ZoneNumberType:
             entities.append(ZoneConfigNumber(moebot, zone, part))
@@ -24,7 +28,46 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
     async_add_entities(entities)
 
 
+class RainDelayNumber(BaseMoeBotEntity, NumberEntity):
+    """Control del tiempo de espera tras lluvia (DP 139)."""
+
+    def __init__(self, moebot: MoeBot):
+        super().__init__(moebot)
+        self._attr_unique_id = f"{self._moebot.id}_rain_delay_min"
+        self._attr_entity_category = EntityCategory.CONFIG
+        self._attr_name = "Tiempo Espera Lluvia"
+        self._attr_native_min_value = 0
+        self._attr_native_max_value = 720
+        self._attr_native_step = 1
+        self._attr_mode = NumberMode.BOX
+        self._attr_native_unit_of_measurement = "min"
+        self._attr_icon = "mdi:timer-sand"
+
+    @property
+    def native_value(self) -> float | None:
+        # Obtenemos el valor Base64 (ej: 'AXg=' -> [0x01, 0x78] -> 120)
+        b64_val = self._moebot._device.status().get('139')
+        if not b64_val:
+            return None
+        try:
+            decoded = base64.b64decode(b64_val)
+            if len(decoded) >= 2:
+                return float(decoded[1])
+        except Exception as e:
+            _log.error("Error decodificando rain_delay (DP 139): %s", e)
+            return None
+        return None
+
+    def set_native_value(self, value: float) -> None:
+        # Convertimos: 120 -> [0x01, 0x78] -> 'AXg='
+        payload = bytes([0x01, int(value)])
+        b64_value = base64.b64encode(payload).decode('utf-8')
+        self._moebot._device.set_status({'139': b64_value})
+        self.schedule_update_ha_state()
+
+
 class WorkingTimeNumber(BaseMoeBotEntity, NumberEntity):
+    """Control del tiempo de trabajo diario (DP 105)."""
 
     def __init__(self, moebot):
         super().__init__(moebot)
@@ -34,21 +77,23 @@ class WorkingTimeNumber(BaseMoeBotEntity, NumberEntity):
         self._attr_unique_id = f"{self._moebot.id}_mow_time_hrs"
         self._attr_entity_category = EntityCategory.CONFIG
 
-        self._attr_name = f"Mowing Time"
+        self._attr_name = "Mowing Time"
 
         self._attr_native_min_value = 1
-        self._attr_native_max_value = 12
+        # Ajustado a 24 según la plantilla de tuya-local para Parkside
+        self._attr_native_max_value = 24
         self._attr_native_step = 1
         self._attr_mode = NumberMode.SLIDER
         self._attr_device_class = NumberDeviceClass.DURATION
-        self._number_option_unit_of_measurement = "hrs"
+        self._attr_native_unit_of_measurement = "h"
 
     @property
     def native_value(self) -> float:
-        return self._moebot.mow_time
+        return float(self._moebot.mow_time)
 
     def set_native_value(self, value: float) -> None:
         self._moebot.mow_time = int(value)
+        self.schedule_update_ha_state()
 
 
 @dataclass
@@ -79,7 +124,7 @@ class ZoneConfigNumber(BaseMoeBotEntity, NumberEntity):
         self._attr_native_max_value = 100 if self.part == ZoneNumberType.RATIO else 200
         self._attr_native_step = 1
         self._attr_mode = NumberMode.BOX
-        self._number_option_unit_of_measurement = "%" if self.part == ZoneNumberType.RATIO else "m"
+        self._attr_native_unit_of_measurement = "%" if self.part == ZoneNumberType.RATIO else "m"
         self._attr_device_class = NumberDeviceClass.DISTANCE if self.part == ZoneNumberType.DISTANCE else None
 
         self._attr_entity_registry_enabled_default = False
@@ -97,11 +142,10 @@ class ZoneConfigNumber(BaseMoeBotEntity, NumberEntity):
     def native_value(self) -> float:
         if not self._moebot.zones:
             _log.debug("Zone data hasn't been retrieved, can't provide values")
-            return
+            return None
 
         zone_values = ZoneConfigNumber.zone_config_to_list(self._moebot.zones)
-
-        return zone_values[(2 * (self.zone - 1)) + self.part.value.position]
+        return float(zone_values[(2 * (self.zone - 1)) + self.part.value.position])
 
     def set_native_value(self, value: float) -> None:
         new_zone_values = ZoneConfigNumber.zone_config_to_list(self._moebot.zones)
@@ -109,3 +153,4 @@ class ZoneConfigNumber(BaseMoeBotEntity, NumberEntity):
 
         zc = ZoneConfig(*new_zone_values)
         self._moebot.zones = zc
+        self.schedule_update_ha_state()
