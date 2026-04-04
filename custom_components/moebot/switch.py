@@ -10,34 +10,30 @@ from .const import DOMAIN
 
 _log = logging.getLogger(__package__)
 
+
 async def async_setup_entry(hass, config_entry, async_add_entities):
     """Add switches for passed config_entry in HA."""
     moebot = hass.data[DOMAIN][config_entry.entry_id]
-
     async_add_entities([
         ParkWhenRainingSwitch(moebot),
         HedgehogProtectionSwitch(moebot),
-        BackwardBladeStopSwitch(moebot)
+        BackwardBladeStopSwitch(moebot),
     ])
 
-class ParkWhenRainingSwitch(BaseMoeBotEntity, SwitchEntity):
-    """Controla si el robot debe segar bajo la lluvia (DP 104)."""
-    def __init__(self, moebot: MoeBot):
-        super().__init__(moebot)
 
-        # A unique_id for this entity within this domain.
-        # Note: This is NOT used to generate the user visible Entity ID used in automations.
+class ParkWhenRainingSwitch(BaseMoeBotEntity, SwitchEntity):
+    """Controls whether the mower runs in rain (DP 104 via pymoebot)."""
+
+    def __init__(self, moebot: MoeBot) -> None:
+        super().__init__(moebot)
         self._attr_unique_id = f"{self._moebot.id}_park_if_raining"
         self._attr_entity_category = EntityCategory.CONFIG
-        
-        # Corregido: 'Mow in Rain' refleja fielmente el valor de self._moebot.mow_in_rain
         self._attr_name = "Mow in Rain"
         self._attr_icon = "mdi:weather-pouring"
 
     @property
     def is_on(self) -> bool:
-        # Nota: pymoebot gestiona esto internamente con el DP 104
-        return self._moebot.mow_in_rain
+        return bool(self._moebot.mow_in_rain)
 
     def turn_on(self, **kwargs: Any) -> None:
         self._moebot.mow_in_rain = True
@@ -47,30 +43,37 @@ class ParkWhenRainingSwitch(BaseMoeBotEntity, SwitchEntity):
         self._moebot.mow_in_rain = False
         self.schedule_update_ha_state()
 
+
 class HedgehogProtectionSwitch(BaseMoeBotEntity, SwitchEntity):
-    """Entidad para el modo protección de erizos (DP 118)."""
-    def __init__(self, moebot: MoeBot):
+    """DP 118 – Small animal protection. Reads from push cache, never polls."""
+
+    def __init__(self, moebot: MoeBot) -> None:
         super().__init__(moebot)
         self._attr_unique_id = f"{self._moebot.id}_hedgehog_protection"
         self._attr_entity_category = EntityCategory.CONFIG
         self._attr_name = "Protección de Erizos"
-        self._attr_icon = "mdi:account-group"
+        self._attr_icon = "mdi:paw"
 
     @property
     def is_on(self) -> bool:
-        return self._moebot._device.status().get('118') is True
+        # Read from push cache – avoids blocking status() call
+        return self._dp_cache.get("118") is True
 
     def turn_on(self, **kwargs: Any) -> None:
-        self._moebot._device.set_status({'118': True})
+        self._moebot._device.set_status({"118": True})
+        self._dp_cache["118"] = True
         self.schedule_update_ha_state()
 
     def turn_off(self, **kwargs: Any) -> None:
-        self._moebot._device.set_status({'118': False})
+        self._moebot._device.set_status({"118": False})
+        self._dp_cache["118"] = False
         self.schedule_update_ha_state()
 
+
 class BackwardBladeStopSwitch(BaseMoeBotEntity, SwitchEntity):
-    """Control de parada de cuchilla al retroceder (DP 121)."""
-    def __init__(self, moebot: MoeBot):
+    """DP 121 – Stop blade on reverse. Reads from push cache, never polls."""
+
+    def __init__(self, moebot: MoeBot) -> None:
         super().__init__(moebot)
         self._attr_unique_id = f"{self._moebot.id}_backward_blade_stop"
         self._attr_entity_category = EntityCategory.CONFIG
@@ -79,16 +82,15 @@ class BackwardBladeStopSwitch(BaseMoeBotEntity, SwitchEntity):
 
     @property
     def is_on(self) -> bool:
-        # Según la plantilla Parkside: 1 es ON (parada activa), 0 es OFF
-        val = self._moebot._device.status().get('121')
-        return val == 1
+        # Parkside template: 1 = ON (blade stops), 0 = OFF
+        return self._dp_cache.get("121") == 1
 
     def turn_on(self, **kwargs: Any) -> None:
-        # Enviamos el entero 1 para activar la parada (según plantilla de tuya-local)
-        self._moebot._device.set_status({'121': 1})
+        self._moebot._device.set_status({"121": 1})
+        self._dp_cache["121"] = 1
         self.schedule_update_ha_state()
 
     def turn_off(self, **kwargs: Any) -> None:
-        # Enviamos el entero 0 para permitir que gire al retroceder
-        self._moebot._device.set_status({'121': 0})
+        self._moebot._device.set_status({"121": 0})
+        self._dp_cache["121"] = 0
         self.schedule_update_ha_state()
