@@ -11,7 +11,6 @@ from homeassistant.components.vacuum import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.icon import icon_for_battery_level
 from pymoebot import MoeBot
 
 from . import BaseMoeBotEntity
@@ -60,7 +59,6 @@ class MoeBotVacuumEntity(BaseMoeBotEntity, StateVacuumEntity):
             VacuumEntityFeature.PAUSE
             | VacuumEntityFeature.STOP
             | VacuumEntityFeature.RETURN_HOME
-            | VacuumEntityFeature.BATTERY
             | VacuumEntityFeature.STATE
             | VacuumEntityFeature.START
         )
@@ -68,20 +66,6 @@ class MoeBotVacuumEntity(BaseMoeBotEntity, StateVacuumEntity):
     @property
     def state(self) -> str:
         return _STATUS_TO_HA.get(self._moebot.state, STATE_ERROR)
-
-    @property
-    def battery_level(self) -> int:
-        try:
-            return round(self._moebot.battery)
-        except (TypeError, ValueError):
-            return 0
-
-    @property
-    def battery_icon(self) -> str:
-        charging = self._moebot.state in {"CHARGING", "CHARGING_WITH_TASK_SUSPEND"}
-        return icon_for_battery_level(
-            battery_level=self.battery_level, charging=charging
-        )
 
     # extra_state_attributes is inherited from BaseMoeBotEntity (cache-based, no polling)
 

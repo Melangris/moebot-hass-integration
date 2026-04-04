@@ -4,6 +4,9 @@ from __future__ import annotations
 import logging
 import base64
 from datetime import datetime
+from typing import Any
+
+import tinytuya
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform, EVENT_HOMEASSISTANT_STOP
@@ -25,17 +28,45 @@ PLATFORMS: list[Platform] = [
 _log = logging.getLogger(__package__)
 
 
+def _build_tuya_writer(device_id: str, ip: str, local_key: str, version: float):
+    """Return a callable that sends a set_status to the device via tinytuya.
+
+    Each call creates a short-lived connection (non-persistent), so it does not
+    interfere with the pymoebot listen() thread that owns the persistent socket.
+    """
+    def _send(dp_dict: dict[str, Any]) -> None:
+        d = tinytuya.Device(device_id, ip, local_key)
+        d.set_version(version)
+        result = d.set_status(dp_dict, nowait=False)
+        _log.debug("tinytuya set_status %r → %r", dp_dict, result)
+
+    return _send
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up MoeBot from a config entry."""
-    moebot = await hass.async_add_executor_job(
-        MoeBot,
-        entry.data["device_id"],
-        entry.data["ip_address"],
-        entry.data["local_key"],
+    device_id: str = entry.data["device_id"]
+    ip_address: str = entry.data["ip_address"]
+    local_key: str = entry.data["local_key"]
+
+    moebot: MoeBot = await hass.async_add_executor_job(
+        MoeBot, device_id, ip_address, local_key
     )
     _log.info("Created a moebot: %r", moebot)
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = moebot
 
+    # Inject a tinytuya writer onto the moebot instance.
+    # pymoebot 0.3.1 does not expose its internal tinytuya device publicly.
+    # We resolve the protocol version from pymoebot itself (moebot.tuya_version)
+    # so we stay consistent with the already-established connection.
+    try:
+        tuya_version = float(moebot.tuya_version)
+    except (TypeError, ValueError):
+        tuya_version = 3.3
+        _log.warning("Could not read tuya_version from moebot, defaulting to 3.3")
+
+    moebot.set_dp = _build_tuya_writer(device_id, ip_address, local_key, tuya_version)
+
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = moebot
     await hass.async_add_executor_job(moebot.listen)
 
     # --- CUSTOM SERVICES ---
@@ -44,9 +75,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """DP 121 – Backward blade stop. 1=stop blade, 0=allow spin."""
         val = 1 if call.data.get("enabled") else 0
         _log.debug("set_back_mowing DP 121 → %s", val)
-        await hass.async_add_executor_job(
-            moebot._device.set_status, {"121": val}
-        )
+        await hass.async_add_executor_job(moebot.set_dp, {"121": val})
 
     async def handle_set_rain_delay(call: ServiceCall) -> None:
         """DP 139 – Rain delay in minutes, encoded as Base64."""
@@ -54,17 +83,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         payload = bytes([0x01, minutes])
         b64_value = base64.b64encode(payload).decode("utf-8")
         _log.debug("set_rain_delay DP 139 → %s (%d min)", b64_value, minutes)
-        await hass.async_add_executor_job(
-            moebot._device.set_status, {"139": b64_value}
-        )
+        await hass.async_add_executor_job(moebot.set_dp, {"139": b64_value})
 
     async def handle_set_hedgehog_protection(call: ServiceCall) -> None:
         """DP 118 – Hedgehog/small animal protection."""
         enabled = bool(call.data.get("enabled"))
         _log.debug("set_hedgehog_protection DP 118 → %s", enabled)
-        await hass.async_add_executor_job(
-            moebot._device.set_status, {"118": enabled}
-        )
+        await hass.async_add_executor_job(moebot.set_dp, {"118": enabled})
 
     for name, handler in (
         ("set_back_mowing", handle_set_back_mowing),

@@ -60,12 +60,12 @@ class HedgehogProtectionSwitch(BaseMoeBotEntity, SwitchEntity):
         return self._dp_cache.get("118") is True
 
     def turn_on(self, **kwargs: Any) -> None:
-        self._moebot._device.set_status({"118": True})
+        self._moebot.set_dp({"118": True})
         self._dp_cache["118"] = True
         self.schedule_update_ha_state()
 
     def turn_off(self, **kwargs: Any) -> None:
-        self._moebot._device.set_status({"118": False})
+        self._moebot.set_dp({"118": False})
         self._dp_cache["118"] = False
         self.schedule_update_ha_state()
 
@@ -86,11 +86,11 @@ class BackwardBladeStopSwitch(BaseMoeBotEntity, SwitchEntity):
         return self._dp_cache.get("121") == 1
 
     def turn_on(self, **kwargs: Any) -> None:
-        self._moebot._device.set_status({"121": 1})
+        self._moebot.set_dp({"121": 1})
         self._dp_cache["121"] = 1
         self.schedule_update_ha_state()
 
     def turn_off(self, **kwargs: Any) -> None:
-        self._moebot._device.set_status({"121": 0})
+        self._moebot.set_dp({"121": 0})
         self._dp_cache["121"] = 0
         self.schedule_update_ha_state()

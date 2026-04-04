@@ -58,7 +58,7 @@ class RainDelayNumber(BaseMoeBotEntity, NumberEntity):
         """Encode minutes as Base64 and send to device."""
         payload = bytes([0x01, int(value)])
         b64_value = base64.b64encode(payload).decode("utf-8")
-        self._moebot._device.set_status({"139": b64_value})
+        self._moebot.set_dp({"139": b64_value})
         # Optimistic update so the UI reflects immediately
         self._dp_cache["139"] = b64_value
         self.schedule_update_ha_state()
