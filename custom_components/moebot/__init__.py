@@ -24,44 +24,17 @@ PLATFORMS: list[Platform] = [
 ]
 
 _log = logging.getLogger(__package__)
-
-# pymoebot uses Python name-mangling: __device → _MoeBot__device
 _PYMOEBOT_DEVICE_ATTR = "_MoeBot__device"
 
 
-def _get_tuya_device(moebot: MoeBot):
-    """Return pymoebot's internal tinytuya Device instance.
-
-    pymoebot 0.3.1 declares its tinytuya device as `self.__device`, which
-    Python mangles to `_MoeBot__device`.  Using this object for writes shares
-    the same persistent TCP socket as the listener, avoiding the 914 error
-    that occurs when a second connection is opened concurrently.
-    """
-    device = getattr(moebot, _PYMOEBOT_DEVICE_ATTR, None)
-    if device is not None and hasattr(device, "set_status"):
-        _log.debug("Using pymoebot internal tinytuya device for writes")
-        return device
-    _log.error(
-        "Could not find pymoebot's tinytuya device at '%s'. "
-        "Write commands will not work. Attributes available: %r",
-        _PYMOEBOT_DEVICE_ATTR,
-        [a for a in dir(moebot) if "device" in a.lower()],
-    )
-    return None
-
-
 def _fetch_initial_dps(moebot: MoeBot) -> dict:
-    """Query device for a full status snapshot using pymoebot's own device.
-
-    Called *before* moebot.listen() so there is no concurrent socket.
-    Returns the raw DPS dict, e.g. {'6': 100, '104': True, '118': False, ...}
-    """
     device = getattr(moebot, _PYMOEBOT_DEVICE_ATTR, None)
     if device is None:
-        _log.warning("Cannot fetch initial DPS: internal device not accessible")
+        _log.warning("Cannot fetch initial DPS: _MoeBot__device not found")
         return {}
     try:
         result = device.status()
+        _log.warning("DIAG _fetch_initial_dps raw result: %r", result)
         if isinstance(result, dict):
             dps = result.get("dps", {})
             _log.debug("Initial DPS snapshot: %r", dps)
@@ -81,46 +54,45 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     _log.info("Created moebot: %r", moebot)
 
-    # Fetch initial DPS *before* starting the listener (single connection).
     initial_dps: dict = await hass.async_add_executor_job(
         _fetch_initial_dps, moebot
     )
     moebot._initial_dps = initial_dps
 
-    # Inject write callable using the shared internal tinytuya device.
-    tuya_device = _get_tuya_device(moebot)
-    if tuya_device is not None:
-        # nowait=True: fire-and-forget; the device will push back the new
-        # state via the persistent listener socket, triggering a cache update.
-        moebot.set_dp = lambda dp_dict: tuya_device.set_status(dp_dict, nowait=True)
+    tuya_device = getattr(moebot, _PYMOEBOT_DEVICE_ATTR, None)
+    _log.warning("DIAG tuya_device at setup: %r  (has set_status: %s)",
+                 tuya_device, hasattr(tuya_device, "set_status"))
+
+    if tuya_device is not None and hasattr(tuya_device, "set_status"):
+        def _set_dp(dp_dict: dict) -> Any:
+            _log.warning("DIAG _set_dp called with %r  device=%r", dp_dict, tuya_device)
+            try:
+                result = tuya_device.set_status(dp_dict, nowait=True)
+                _log.warning("DIAG set_status result: %r", result)
+                return result
+            except Exception as exc:
+                _log.error("DIAG set_status raised: %s", exc)
+                raise
+        moebot.set_dp = _set_dp
     else:
-        moebot.set_dp = lambda dp_dict: _log.error(
-            "set_dp called but no tinytuya device available: %r", dp_dict
-        )
+        _log.error("DIAG: _MoeBot__device not found or missing set_status – writes disabled")
+        moebot.set_dp = lambda dp_dict: _log.error("set_dp unavailable: %r", dp_dict)
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = moebot
     await hass.async_add_executor_job(moebot.listen)
 
-    # --- CUSTOM SERVICES ---
-
     async def handle_set_back_mowing(call: ServiceCall) -> None:
-        """DP 121 – Backward blade stop. 1=stop blade, 0=allow spin."""
         val = 1 if call.data.get("enabled") else 0
-        _log.debug("set_back_mowing DP 121 → %s", val)
         await hass.async_add_executor_job(moebot.set_dp, {"121": val})
 
     async def handle_set_rain_delay(call: ServiceCall) -> None:
-        """DP 139 – Rain delay in minutes, Base64-encoded."""
         minutes = int(call.data.get("minutes", 60))
         payload = bytes([0x01, minutes])
         b64_value = base64.b64encode(payload).decode("utf-8")
-        _log.debug("set_rain_delay DP 139 → %s (%d min)", b64_value, minutes)
         await hass.async_add_executor_job(moebot.set_dp, {"139": b64_value})
 
     async def handle_set_hedgehog_protection(call: ServiceCall) -> None:
-        """DP 118 – Hedgehog/small animal protection."""
         enabled = bool(call.data.get("enabled"))
-        _log.debug("set_hedgehog_protection DP 118 → %s", enabled)
         await hass.async_add_executor_job(moebot.set_dp, {"118": enabled})
 
     for name, handler in (
@@ -139,7 +111,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload a config entry."""
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         moebot = hass.data[DOMAIN].pop(entry.entry_id)
         moebot.unlisten()
@@ -149,7 +120,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 def _parse_dps_from_raw_msg(raw_msg: Any) -> dict:
-    """Extract DPS dict from whatever format pymoebot passes to listeners."""
     if not isinstance(raw_msg, dict):
         return {}
     if "dps" in raw_msg and isinstance(raw_msg["dps"], dict):
@@ -163,7 +133,6 @@ def _parse_dps_from_raw_msg(raw_msg: Any) -> dict:
 
 
 class BaseMoeBotEntity(Entity):
-    """Abstract base entity for all MoeBot entities."""
 
     _TRACKED_DPS: tuple[str, ...] = ("118", "121", "139")
 
@@ -177,7 +146,7 @@ class BaseMoeBotEntity(Entity):
             model="PMRDA 20-Li A1",
         )
         self._dp_cache: dict[str, Any] = {}
-        self._listener_fn = None  # stored to allow deregistration
+        self._listener_fn = None
 
     @property
     def available(self) -> bool:
@@ -196,32 +165,25 @@ class BaseMoeBotEntity(Entity):
         return attrs
 
     async def async_added_to_hass(self) -> None:
-        """Register listener and pre-populate DP cache."""
         for dp, val in getattr(self._moebot, "_initial_dps", {}).items():
             if str(dp) in self._TRACKED_DPS:
                 self._dp_cache[str(dp)] = val
 
         def listener(raw_msg: Any) -> None:
             dps = _parse_dps_from_raw_msg(raw_msg)
-            updated = False
             for dp in self._TRACKED_DPS:
                 if dp in dps:
                     self._dp_cache[dp] = dps[dp]
-                    updated = True
-            if updated:
-                _log.debug("%s cache updated: %r", self.__class__.__name__, self._dp_cache)
             self.schedule_update_ha_state()
 
         self._listener_fn = listener
         self._moebot.add_listener(listener)
 
     async def async_will_remove_from_hass(self) -> None:
-        """Deregister listener to prevent accumulation across reloads."""
         if self._listener_fn is not None:
             listeners: list = getattr(self._moebot, "_MoeBot__listeners", [])
             try:
                 listeners.remove(self._listener_fn)
-                _log.debug("Removed listener for %s", self.__class__.__name__)
             except ValueError:
                 pass
             self._listener_fn = None
