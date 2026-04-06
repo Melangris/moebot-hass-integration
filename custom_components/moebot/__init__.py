@@ -27,20 +27,48 @@ PLATFORMS: list[Platform] = [
 
 _log = logging.getLogger(__package__)
 
+# Attribute names that pymoebot may use internally for its tinytuya Device.
+_PYMOEBOT_TUYA_ATTRS = ("_d", "_device", "_tuya", "_tinytuya", "_client", "_mower_device")
+
+
+def _find_tuya_device(moebot: MoeBot):
+    """Return pymoebot's internal tinytuya Device if accessible, else None."""
+    for attr in _PYMOEBOT_TUYA_ATTRS:
+        candidate = getattr(moebot, attr, None)
+        if candidate is not None and hasattr(candidate, "set_status"):
+            _log.debug("Found pymoebot's tinytuya device at attribute '%s'", attr)
+            return candidate
+    _log.debug("pymoebot internal tinytuya device not found; will use ephemeral connections")
+    return None
+
 
 def _build_tuya_writer(device_id: str, ip: str, local_key: str, version: float):
-    """Return a callable that sends a set_status to the device via tinytuya.
+    """Fallback write path: ephemeral tinytuya connection per write.
 
-    Each call creates a short-lived connection (non-persistent), so it does not
-    interfere with the pymoebot listen() thread that owns the persistent socket.
+    Uses nowait=True to avoid racing with pymoebot's persistent listener socket.
     """
     def _send(dp_dict: dict[str, Any]) -> None:
         d = tinytuya.Device(device_id, ip, local_key)
         d.set_version(version)
-        result = d.set_status(dp_dict, nowait=False)
-        _log.debug("tinytuya set_status %r → %r", dp_dict, result)
+        result = d.set_status(dp_dict, nowait=True)
+        _log.debug("tinytuya ephemeral set_status %r → %r", dp_dict, result)
 
     return _send
+
+
+def _fetch_initial_dps(device_id: str, ip: str, local_key: str, version: float) -> dict:
+    """Query device for a full status snapshot before the listener starts."""
+    try:
+        d = tinytuya.Device(device_id, ip, local_key)
+        d.set_version(version)
+        result = d.status()
+        if isinstance(result, dict):
+            dps = result.get("dps", {})
+            _log.debug("Initial DPS snapshot: %r", dps)
+            return dps
+    except Exception as exc:
+        _log.warning("Could not fetch initial DPS snapshot: %s", exc)
+    return {}
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -54,17 +82,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     _log.info("Created a moebot: %r", moebot)
 
-    # Inject a tinytuya writer onto the moebot instance.
-    # pymoebot 0.3.1 does not expose its internal tinytuya device publicly.
-    # We resolve the protocol version from pymoebot itself (moebot.tuya_version)
-    # so we stay consistent with the already-established connection.
     try:
         tuya_version = float(moebot.tuya_version)
     except (TypeError, ValueError):
         tuya_version = 3.3
         _log.warning("Could not read tuya_version from moebot, defaulting to 3.3")
 
-    moebot.set_dp = _build_tuya_writer(device_id, ip_address, local_key, tuya_version)
+    # Fetch initial DPS *before* starting the listener so the cache is
+    # pre-populated for DPs 118, 121, 139 which are not pushed spontaneously.
+    initial_dps: dict = await hass.async_add_executor_job(
+        _fetch_initial_dps, device_id, ip_address, local_key, tuya_version
+    )
+    moebot._initial_dps = initial_dps  # consumed by BaseMoeBotEntity.async_added_to_hass
+
+    # Inject write callable. Prefer pymoebot's own tinytuya device (same
+    # socket) to avoid the concurrent-connection errors (Tuya 904/914).
+    tuya_device = _find_tuya_device(moebot)
+    if tuya_device is not None:
+        moebot.set_dp = lambda dp_dict: tuya_device.set_status(dp_dict, nowait=True)
+    else:
+        moebot.set_dp = _build_tuya_writer(device_id, ip_address, local_key, tuya_version)
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = moebot
     await hass.async_add_executor_job(moebot.listen)
@@ -78,7 +115,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await hass.async_add_executor_job(moebot.set_dp, {"121": val})
 
     async def handle_set_rain_delay(call: ServiceCall) -> None:
-        """DP 139 – Rain delay in minutes, encoded as Base64."""
+        """DP 139 – Rain delay in minutes, Base64-encoded."""
         minutes = int(call.data.get("minutes", 60))
         payload = bytes([0x01, minutes])
         b64_value = base64.b64encode(payload).decode("utf-8")
@@ -98,10 +135,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     ):
         hass.services.async_register(DOMAIN, name, handler)
 
-    # --- END CUSTOM SERVICES ---
-
     def shutdown_moebot(event) -> None:
-        """Stop listener on HA shutdown."""
         moebot.unlisten()
 
     hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, shutdown_moebot)
@@ -119,11 +153,36 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return unload_ok
 
 
+def _parse_dps_from_raw_msg(raw_msg: Any) -> dict:
+    """Extract DPS dict from whatever format pymoebot passes to listeners.
+
+    pymoebot wraps tinytuya and may pass:
+      - {'dps': {'101': 'MOWING', ...}}       (flat wrapper)
+      - {'data': {'dps': {...}}}               (nested tinytuya format)
+      - {'101': 'MOWING', ...}                (raw flat dict without wrapper)
+    """
+    if not isinstance(raw_msg, dict):
+        return {}
+
+    if "dps" in raw_msg and isinstance(raw_msg["dps"], dict):
+        return raw_msg["dps"]
+
+    data = raw_msg.get("data")
+    if isinstance(data, dict) and "dps" in data:
+        return data["dps"]
+
+    # Raw flat dict with numeric-string keys
+    if any(str(k).isdigit() for k in raw_msg):
+        return {str(k): v for k, v in raw_msg.items()}
+
+    return {}
+
+
 class BaseMoeBotEntity(Entity):
     """Abstract base entity for all MoeBot entities."""
 
-    # DPs we want to track from push updates
-    _TRACKED_DPS: tuple[str, ...] = ("103", "118", "121", "139")
+    # DPs not exposed by pymoebot as properties – we cache them ourselves.
+    _TRACKED_DPS: tuple[str, ...] = ("118", "121", "139")
 
     def __init__(self, moebot: MoeBot) -> None:
         self._moebot = moebot
@@ -134,20 +193,11 @@ class BaseMoeBotEntity(Entity):
             manufacturer="Parkside",
             model="PMRDA 20-Li A1",
         )
-        # DP cache populated by push listener – avoids blocking status() calls
-        self._dp_cache: dict[str, object] = {}
-
-    # ------------------------------------------------------------------
-    # Availability
-    # ------------------------------------------------------------------
+        self._dp_cache: dict[str, Any] = {}
 
     @property
     def available(self) -> bool:
         return self._moebot.online
-
-    # ------------------------------------------------------------------
-    # State attributes – reads ONLY from cache, never calls status()
-    # ------------------------------------------------------------------
 
     @property
     def extra_state_attributes(self) -> dict:
@@ -159,24 +209,21 @@ class BaseMoeBotEntity(Entity):
         attrs["hedgehog_protection_118"] = self._dp_cache.get("118")
         attrs["backward_blade_stop_121"] = self._dp_cache.get("121")
         attrs["rain_delay_raw_139"] = self._dp_cache.get("139")
-        attrs["status_detailed_103"] = self._dp_cache.get("103")
         return attrs
 
-    # ------------------------------------------------------------------
-    # Listener registration
-    # ------------------------------------------------------------------
-
     async def async_added_to_hass(self) -> None:
-        """Register listener once entity is added to HA."""
+        """Register listener and pre-populate DP cache."""
+        # Seed cache from the initial snapshot taken before the listener started.
+        for dp, val in getattr(self._moebot, "_initial_dps", {}).items():
+            if dp in self._TRACKED_DPS:
+                self._dp_cache[dp] = val
 
-        def listener(raw_msg: dict) -> None:
-            _log.debug("%s update: %r", self.__class__.__name__, raw_msg)
-            # raw_msg may contain a 'dps' key with updated datapoints
-            if isinstance(raw_msg, dict):
-                dps: dict = raw_msg.get("dps", {})
-                for dp in self._TRACKED_DPS:
-                    if dp in dps:
-                        self._dp_cache[dp] = dps[dp]
+        def listener(raw_msg: Any) -> None:
+            _log.debug("%s push: %r", self.__class__.__name__, raw_msg)
+            dps = _parse_dps_from_raw_msg(raw_msg)
+            for dp in self._TRACKED_DPS:
+                if dp in dps:
+                    self._dp_cache[dp] = dps[dp]
             self.schedule_update_ha_state()
 
         self._moebot.add_listener(listener)

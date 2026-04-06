@@ -1,5 +1,4 @@
 import logging
-import base64
 
 from homeassistant.components.sensor import SensorEntity, SensorStateClass, SensorDeviceClass
 from homeassistant.const import PERCENTAGE
@@ -42,9 +41,23 @@ class MowingStateSensor(SensorBase):
 
 
 class DetailedStatusSensor(SensorBase):
-    """Sensor for DP 103 (detailed error/status) – reads from push cache."""
+    """Sensor for DP 103 (MachineWarning) – translated to Spanish.
 
-    _STATUS_MAP = {
+    NOTE: On the Parkside PMRDA this DP permanently reports 'MOWER_LEAN'
+    even when there is no actual problem.  Use the main activity entity
+    (lawn_mower / vacuum) to detect real error states.
+    """
+
+    # Values confirmed in the wild for Parkside / MoeBot S (DP 103).
+    # Keys are the raw uppercase strings sent by the device.
+    _STATUS_MAP: dict[str, str] = {
+        "MOWER_LEAN":        "Inclinado (normal en Parkside)",
+        "RAIN_PARK":         "Aparcado por Lluvia",
+        "MOWER_UI_LOCKED":   "Bloqueado (PIN requerido)",
+        "MOWER_EMERGENCY":   "Emergencia (STOP pulsado)",
+        "NO_SIGNAL":         "Sin Señal de Cable",
+        "OUTSIDE_BOUNDARY":  "Fuera de Perímetro",
+        # Legacy lowercase values from tuya-local template (kept for safety)
         "charge_done":       "Carga Completa",
         "charging":          "Cargando",
         "emergency":         "Emergencia (STOP)",
@@ -67,10 +80,10 @@ class DetailedStatusSensor(SensorBase):
 
     @property
     def native_value(self) -> str:
-        """Return translated state from cached DP 103 – no network call."""
-        raw = self._dp_cache.get("103")
+        """Return translated emergency/warning state from pymoebot."""
+        raw = self._moebot.emergency_state
         if raw is None:
-            return "Unknown"
+            return None
         return self._STATUS_MAP.get(str(raw), f"Desconocido ({raw})")
 
 
@@ -86,6 +99,8 @@ class EmergencyStateSensor(SensorBase):
 
 
 class WorkModeSensor(SensorBase):
+    """Sensor for DP 114 (boolreserved01 on Parkside, string enum on MoeBot S)."""
+
     def __init__(self, moebot):
         super().__init__(moebot)
         self._attr_unique_id = f"{self._moebot.id}_work_mode"
@@ -93,7 +108,13 @@ class WorkModeSensor(SensorBase):
 
     @property
     def native_value(self):
-        return self._moebot.work_mode
+        val = self._moebot.work_mode
+        if val is None:
+            return None
+        # Parkside PMRDA sends a boolean for DP 114; MoeBot S sends a string.
+        if isinstance(val, bool):
+            return "Auto" if val else "Manual"
+        return str(val)
 
 
 class BatterySensor(SensorBase):
