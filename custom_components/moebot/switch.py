@@ -21,6 +21,12 @@ async def async_setup_entry(hass, config_entry, async_add_entities):
 
 
 class ParkWhenRainingSwitch(BaseMoeBotEntity, SwitchEntity):
+    """DP 104 – Park when rain is detected.
+
+    ON  = robot returns to base when rain sensor triggers.
+    OFF = robot ignores rain and keeps mowing.
+    """
+
     def __init__(self, moebot: MoeBot) -> None:
         super().__init__(moebot)
         self._attr_unique_id = f"{self._moebot.id}_park_if_raining"
@@ -40,6 +46,8 @@ class ParkWhenRainingSwitch(BaseMoeBotEntity, SwitchEntity):
 
 
 class HedgehogProtectionSwitch(BaseMoeBotEntity, SwitchEntity):
+    """DP 118 – Small animal protection."""
+
     def __init__(self, moebot: MoeBot) -> None:
         super().__init__(moebot)
         self._attr_unique_id = f"{self._moebot.id}_hedgehog_protection"
@@ -52,25 +60,19 @@ class HedgehogProtectionSwitch(BaseMoeBotEntity, SwitchEntity):
         return self._dp_cache.get("118") is True
 
     def turn_on(self, **kwargs: Any) -> None:
-        _log.warning("DIAG turn_on 118: set_dp=%r, device=%r",
-                     self._moebot.set_dp,
-                     getattr(self._moebot, "_MoeBot__device", "NOT_FOUND"))
-        result = self._moebot.set_dp({"118": True})
-        _log.warning("DIAG set_dp({'118': True}) result: %r", result)
+        self._moebot.set_dp({"118": True})
         self._dp_cache["118"] = True
         self.schedule_update_ha_state()
 
     def turn_off(self, **kwargs: Any) -> None:
-        _log.warning("DIAG turn_off 118: set_dp=%r, device=%r",
-                     self._moebot.set_dp,
-                     getattr(self._moebot, "_MoeBot__device", "NOT_FOUND"))
-        result = self._moebot.set_dp({"118": False})
-        _log.warning("DIAG set_dp({'118': False}) result: %r", result)
+        self._moebot.set_dp({"118": False})
         self._dp_cache["118"] = False
         self.schedule_update_ha_state()
 
 
 class BackwardBladeStopSwitch(BaseMoeBotEntity, SwitchEntity):
+    """DP 121 – Stop blade when reversing (integer: 1=stop, 0=spin)."""
+
     def __init__(self, moebot: MoeBot) -> None:
         super().__init__(moebot)
         self._attr_unique_id = f"{self._moebot.id}_backward_blade_stop"
@@ -83,15 +85,11 @@ class BackwardBladeStopSwitch(BaseMoeBotEntity, SwitchEntity):
         return self._dp_cache.get("121") == 1
 
     def turn_on(self, **kwargs: Any) -> None:
-        _log.warning("DIAG turn_on 121")
-        result = self._moebot.set_dp({"121": 1})
-        _log.warning("DIAG set_dp({'121': 1}) result: %r", result)
+        self._moebot.set_dp({"121": 1})
         self._dp_cache["121"] = 1
         self.schedule_update_ha_state()
 
     def turn_off(self, **kwargs: Any) -> None:
-        _log.warning("DIAG turn_off 121")
-        result = self._moebot.set_dp({"121": 0})
-        _log.warning("DIAG set_dp({'121': 0}) result: %r", result)
+        self._moebot.set_dp({"121": 0})
         self._dp_cache["121"] = 0
         self.schedule_update_ha_state()

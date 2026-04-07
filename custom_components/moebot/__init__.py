@@ -24,17 +24,52 @@ PLATFORMS: list[Platform] = [
 ]
 
 _log = logging.getLogger(__package__)
-_PYMOEBOT_DEVICE_ATTR = "_MoeBot__device"
+
+# pymoebot 0.3.1 internal attributes (name-mangled)
+_ATTR_DEVICE    = "_MoeBot__device"
+_ATTR_QUEUE_CMD = "_MoeBot__queue_command"
+_ATTR_LISTENERS = "_MoeBot__listeners"
+
+
+def _make_set_dp(moebot: MoeBot):
+    """Return the best available callable to write DPs to the device.
+
+    pymoebot serialises all device writes through __queue_command, which
+    is processed by its own listener thread — the same thread that owns
+    the persistent TCP socket.  Using this mechanism is the only safe way
+    to write DPs without racing against the listener's recv() loop.
+
+    Direct set_status() calls on the shared Device object from a different
+    thread (HA executor) result in the device silently dropping the command
+    because the listener thread receives the ACK before set_status() can,
+    leaving the operation with no confirmation and no effect.
+    """
+    queue_command = getattr(moebot, _ATTR_QUEUE_CMD, None)
+    if callable(queue_command):
+        _log.debug("set_dp will use pymoebot's internal __queue_command")
+        return queue_command
+
+    # Fallback: should never be reached with pymoebot 0.3.1, but log clearly.
+    _log.error(
+        "pymoebot.__queue_command not found — DP writes will not work. "
+        "Available attrs: %r",
+        [a for a in dir(moebot) if "queue" in a.lower() or "command" in a.lower()],
+    )
+    return lambda dp_dict: _log.error("set_dp unavailable: %r", dp_dict)
 
 
 def _fetch_initial_dps(moebot: MoeBot) -> dict:
-    device = getattr(moebot, _PYMOEBOT_DEVICE_ATTR, None)
+    """Snapshot current DPs before the listener starts.
+
+    Uses pymoebot's own Device object (persist=False at this point, before
+    listen() is called) so there is no concurrent socket conflict.
+    """
+    device = getattr(moebot, _ATTR_DEVICE, None)
     if device is None:
-        _log.warning("Cannot fetch initial DPS: _MoeBot__device not found")
+        _log.warning("Cannot fetch initial DPS: %s not found", _ATTR_DEVICE)
         return {}
     try:
         result = device.status()
-        _log.warning("DIAG _fetch_initial_dps raw result: %r", result)
         if isinstance(result, dict):
             dps = result.get("dps", {})
             _log.debug("Initial DPS snapshot: %r", dps)
@@ -54,44 +89,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     _log.info("Created moebot: %r", moebot)
 
+    # Snapshot DPs before listen() so the cache starts populated.
     initial_dps: dict = await hass.async_add_executor_job(
         _fetch_initial_dps, moebot
     )
     moebot._initial_dps = initial_dps
 
-    tuya_device = getattr(moebot, _PYMOEBOT_DEVICE_ATTR, None)
-    _log.warning("DIAG tuya_device at setup: %r  (has set_status: %s)",
-                 tuya_device, hasattr(tuya_device, "set_status"))
-
-    if tuya_device is not None and hasattr(tuya_device, "set_status"):
-        def _set_dp(dp_dict: dict) -> Any:
-            _log.warning("DIAG _set_dp called with %r  device=%r", dp_dict, tuya_device)
-            try:
-                result = tuya_device.set_status(dp_dict, nowait=True)
-                _log.warning("DIAG set_status result: %r", result)
-                return result
-            except Exception as exc:
-                _log.error("DIAG set_status raised: %s", exc)
-                raise
-        moebot.set_dp = _set_dp
-    else:
-        _log.error("DIAG: _MoeBot__device not found or missing set_status – writes disabled")
-        moebot.set_dp = lambda dp_dict: _log.error("set_dp unavailable: %r", dp_dict)
+    # Inject thread-safe write callable using pymoebot's internal queue.
+    moebot.set_dp = _make_set_dp(moebot)
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = moebot
     await hass.async_add_executor_job(moebot.listen)
 
+    # --- CUSTOM SERVICES ---
+
     async def handle_set_back_mowing(call: ServiceCall) -> None:
+        """DP 121 – Backward blade stop. 1=stop blade, 0=allow spin."""
         val = 1 if call.data.get("enabled") else 0
         await hass.async_add_executor_job(moebot.set_dp, {"121": val})
 
     async def handle_set_rain_delay(call: ServiceCall) -> None:
+        """DP 139 – Rain delay in minutes, Base64-encoded."""
         minutes = int(call.data.get("minutes", 60))
         payload = bytes([0x01, minutes])
         b64_value = base64.b64encode(payload).decode("utf-8")
         await hass.async_add_executor_job(moebot.set_dp, {"139": b64_value})
 
     async def handle_set_hedgehog_protection(call: ServiceCall) -> None:
+        """DP 118 – Hedgehog/small animal protection."""
         enabled = bool(call.data.get("enabled"))
         await hass.async_add_executor_job(moebot.set_dp, {"118": enabled})
 
@@ -111,6 +136,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Unload a config entry."""
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         moebot = hass.data[DOMAIN].pop(entry.entry_id)
         moebot.unlisten()
@@ -120,6 +146,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 def _parse_dps_from_raw_msg(raw_msg: Any) -> dict:
+    """Extract DPS dict from whatever format pymoebot passes to listeners."""
     if not isinstance(raw_msg, dict):
         return {}
     if "dps" in raw_msg and isinstance(raw_msg["dps"], dict):
@@ -133,6 +160,7 @@ def _parse_dps_from_raw_msg(raw_msg: Any) -> dict:
 
 
 class BaseMoeBotEntity(Entity):
+    """Abstract base entity for all MoeBot entities."""
 
     _TRACKED_DPS: tuple[str, ...] = ("118", "121", "139")
 
@@ -165,6 +193,7 @@ class BaseMoeBotEntity(Entity):
         return attrs
 
     async def async_added_to_hass(self) -> None:
+        """Register listener and pre-populate DP cache from initial snapshot."""
         for dp, val in getattr(self._moebot, "_initial_dps", {}).items():
             if str(dp) in self._TRACKED_DPS:
                 self._dp_cache[str(dp)] = val
@@ -180,8 +209,9 @@ class BaseMoeBotEntity(Entity):
         self._moebot.add_listener(listener)
 
     async def async_will_remove_from_hass(self) -> None:
+        """Deregister listener to prevent accumulation across reloads."""
         if self._listener_fn is not None:
-            listeners: list = getattr(self._moebot, "_MoeBot__listeners", [])
+            listeners: list = getattr(self._moebot, _ATTR_LISTENERS, [])
             try:
                 listeners.remove(self._listener_fn)
             except ValueError:
